@@ -1,5 +1,5 @@
 # The Google File System
-#### Sanjay Ghemawat, Howard Gobioff, and Shun-Tak Leung<br/><center>google*</center>
+#### Sanjay Ghemawat, Howard Gobioff, and Shun-Tak Leung<br/><div style="text-align:center">google*</div>
 
 *：这些作者可以通过以下地址联系：{sanjay,hgobioff,shuntak}@google.com
 
@@ -33,3 +33,27 @@ D [4]: 3—分布式文件系统
 第四，协设计（co-designing）应用程序和文件系统API可以增加我们的灵活性，使得整体系统受益。例如，我们放宽了GFS的一致性模型，这样大大简化了文件系统，但却没有给应用程序增加繁重的负担。我们还引入了一个原子添加的操作以便多个客户端可以并发地添加同一个文件，而不需要在它们之间做额外的同步。我们将在论文后面更详细地讨论这些东西。
 
 目前我们部署了多个GFS集群，用于不同的目的。其中最大的集群拥有超过1000个存储节点，超过300TB的硬盘存储，并且被不同机器上的数百个客户端持续地，繁忙地访问。
+
+## 1. 设计概览（DESIGN OVERVIEW）
+### 2.1 假设（Assumptions）
+当根据我们的需求设计一个文件系统时，我们被一些假设所指引，这些假设既给予我们挑战，也给予我们机遇。我们在早先聊到了一些关键的观察到的东西，现在我们将更详细地铺陈我们的假设。
+
+* 系统由许多不昂贵的经常故障的组件构造而成。它必须持续的监控自身，并且探测到例常的组件故障，容忍这些故障，并且从中恢复。
+* 系统存储适量的大文件。我们期望存储几百万文件，每个有通常100MB或更大。存储几GB的文件对我们来说是常态，因此必须有效地管理它们。必须支持小文件存储，但我们无须为它们做优化。
+* 工作负载主要包含两种读操作：大数据量的流式读取（streaming read）和小数据量的随机读取。在大数据量的流式读取里，单个读操作通常读取几百KB，而且经常读取1MB或更多字节。同一个客户端发起的连续操作经常顺序读取一个文件的一个连续区域。一个小数据量的随机读取通常在某个任意的文件偏移量下读取几KB。关注性能的应用程序通常对它们的小数据量读取操作进行排序并批量执行，以便朝着文件尾部的方向稳步地读取而非往返读取。
+* 工作负载还包含许多大数据量的顺序写入，它们把数据添加到文件尾部。通常写入的数据量类似于上述流式读取操作的数据量。一旦写入完毕，文件极少再去修改。系统当然也支持在文件任意位置的小数据量的写入，但是这些操作无须高效。
+* 系统必须为多个客户端并发地朝同一个文件添加数据的情况来高效地实现良定义（well-defined）的语义。我们的文件经常用作生产者-消费者对列，或者用于多路归并。几百个生产者（每台机器上跑一个生产者）将并发地朝一个文件添加数据。
+• The system must efficiently implement well-defined se-
+mantics for multiple clients that concurrently append
+to the same file. Our files are often used as producer-
+consumer queues or for many-way merging. Hundreds
+of producers, running one per machine, will concur-
+rently append to a file. Atomicity with minimal syn-
+chronization overhead is essential. The file may be
+read later, or a consumer may be reading through the
+file simultaneously.
+• High sustained bandwidth is more important than low
+latency. Most of our target applications place a pre-
+mium on processing data in bulk at a high rate, while
+few have stringent response time requirements for an
+individual read or write.
