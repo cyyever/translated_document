@@ -55,7 +55,7 @@ D [4]: 3—分布式文件系统
 
 文件被分成固定大小的*数据块*（chunk）。master会在创建每个数据块之时分配一个全局唯一的，并且不可修改的64位的*数据块句柄*（chunk handle）给它，来标识这个数据块。Chunkserver把这些数据库当作Linux文件存储在本地硬盘，并且通过指定的数据库句柄和字节范围来读取和写入数据块的数据。为了达到可靠性，每个数据块被复制在多个chunkserver上面。默认情况下，我们存储三个副本，但是用户可以为文件命名空间（file namespace）的不同区域来指定不同的复制级别。
 
-master维护所有的文件系统元数据。这些元数据包含了命名空间，访问控制信息，从文件到数据块的映射关系以及数据块的当前位置（译者注：也就是数据块的所有副本所在的多个chunkserver）。它还控制了整个文件系统范围内的操作，例如数据块凭据（lease）的管理，孤儿数据块的垃圾回收以及数据块在chunkserver之间搬迁。Master定时地通过*心跳*（HeartBeat）消息来与每个chunkserver通信，以便把指令给予chunkserver或者收集它的状态。
+master维护所有的文件系统元数据。这些元数据包含了命名空间，访问控制信息，从文件到数据块的映射关系以及数据块的当前位置（译者注：也就是数据块的所有副本所在的多个chunkserver）。它还控制了整个文件系统范围内的活动，例如数据块凭据（lease）的管理，孤儿数据块的垃圾回收以及数据块在chunkserver之间搬迁。Master定时地通过*心跳*（HeartBeat）消息来与每个chunkserver通信，以便把指令给予chunkserver或者收集它的状态。
 
 GFS的客户端代码被链接到每个应用程序，它实现了该文件系统的API，并且代表应用程序和master以及chunkserver进行通信，以便读取和写入数据。对于元数据的操作，客户端和master进行交互，但是数据相关的所有通讯是直接在客户端和chunkserver之间进行的。我们并不提供POSIX API，因此不需要给linux的vnode层增加钩子。
 
@@ -74,22 +74,24 @@ GFS的客户端代码被链接到每个应用程序，它实现了该文件系�
 但是当GFS第一次用于一个batch-queue系统时，热点确实是个问题：一个可执行程序被写入到GFS,它的文件只有一个数据块，然后同时在数百台机器上启动这个程序。存储这个可执行程序的少量chunkserver被数百个同时出现的请求搞得过载。我们通过使用一个更高的复制参数来存储这种可执行程序，以及让batch-queue系统错开程序启动的时刻来解决这个问题。一个可能的长期解决方案是允许客户端在这种情况下从其它客户端读取数据。
 
 ### 2.6 元数据（Metadata）
-Master存储三种主要的元数据：文件命名空间和数据块命名空间，从文件到数据块的映射，每个数据块的副本的位置。所有的元数据被放在master的内存中。通过把变更写入到一个操作日志（operation log）的方式，前两种类型（命名空间和文件到数据块的映射）的元数据也被持久存储，这个操作日志保持在master的本地硬盘，同时在远程机器上保存副本。使用一个日志允许我们
+Master存储三种主要的元数据：文件命名空间和数据块命名空间，从文件到数据块的映射，每个数据块的副本的位置。所有的元数据被放在master的内存中。通过把变更写入到一个操作日志（operation log）的方式，前两种类型（命名空间和文件到数据块的映射）的元数据也被持久存储，这个操作日志存放在master的本地硬盘，同时也被复制到在远程机器。使用一个日志允许我们简单地，可靠地更新master的状态，而且避免了master崩溃导致不一致性的风险。Master并不对数据块位置的信息做持久存储。相反地，master会在启动时或者每当一个chunkserver加入集群时询问每个chunkserver关于它所存储的数据块。
 
-The master stores three major types of metadata: the file
-and chunk namespaces, the mapping from files to chunks,
-and the locations of each chunk’s replicas. All metadata is
-kept in the master’s memory. The first two types (names-
-paces and file-to-chunk mapping) are also kept persistent by
-logging mutations to an operation log stored on the mas-
-ter’s local disk and replicated on remote machines. 
+#### *2.6.1 内存中的数据结构*（In-Memory Data Structures）
+由于元数据被存放到内存里，master能快速地执行操作。此外，master可以容易并高效地定期在后台扫描它的整个状态。这个定期扫描被用来实现数据块的垃圾回收，当chunkserver故障时数据块的重新复制，以及为了在chunkserver之间平衡负载和硬盘空间使用率而进行的数据块搬迁。4.3和4.4节将进一步讨论这些活动。
 
-Using
-a log allows us to update the master state simply, reliably,
-and without risking inconsistencies in the event of a master
-crash. The master does not store chunk location informa-
-tion persistently. Instead, it asks each chunkserver about its
-chunks at master startup and whenever a chunkserver joins
-the cluster.
+对这个只使用内存的方式的一个可能的忧虑是数据块的数量，也因此是整体系统的容量会被master的内存大小所限制。在实际情况中，这并不是一个严重的限制。对每个64MB的数据块，master要维护的元数据小于64个字节。大多数的数据块是被数据填充满的，因为大多数的文件包含许多数据块，在这些之中只有最后一个数据块可能是部分填充的。类似地，文件命名空间对每个文件需要维护的数据少于64个字节，因为它是用前缀压缩来紧凑地存储文件名。
 
+如果需要支持更大的文件系统，给master增加额外内存的成本相对于我们把元数据存放在内存中而得到的整个系统的简化，可靠性，性能和可扩展性来比，也只是一个小价钱。
+
+#### *2.6.2 数据块位置*（Chunk Locations）
+Master并没有把哪些chunkserver拥有给定数据块的副本的信息做持久存储。它只不过在启动时轮询chunkserver来获取这些信息。在此之后master可以令自己拥有最新的信息，因为它控制了所有数据块的放置，并且通过定期的*心跳*消息来监控chunkserver的状态。
+
+我们最初尝试把数据块的信息持久地保存在master上，但是我们决定在master启动时并在之后定期从chunkserver请求数据，因为这么做简单得多。而且这避免了当chunkserver加入和脱离集群，修改名称，故障，重启等情况下维持master和chunkserver之间的同步的问题。在一个拥有数百个服务器的集群里，这些事太经常发生了。
+
+另一种理解这个设计决策的方法是要意识到chunkserver对它的硬盘上存在或者不存在什么数据块有最终的发言权。尝试在master给这种信息维护一个一致性的视图（consistent view）没任何意义，因为chunkserver上的错误可能会导致数据块自然地消失（例如，某个硬盘可能坏了，于是被禁用）或者操作员可能会重命名chunkserver。
+
+#### *2.6.3 操作日志*（Operation Log）
+操作日志包含了关键的元数据修改操作的历史记录。它在GFS里具有核心的地位。它不仅是元数据的唯一持久存储，同时它也作为一条逻辑时间轴来定义并发操作的顺序。文件和数据块，以及数据块的版本（详见4.5节）都唯一且永久地被它们的逻辑创建时间所标识。
  
+由于操作日志是极其重要的，我们必须可靠地存储它，并且在元数据的修改还没做持久存储之前，不能让这些修改被客户端看到。要不然的话，就算是数据块自身在故障中幸存，我们事实上仍然丢失了整个文件系统或者最近的客户端操作。因此，我们会在多个远程机器上复制操作日志，并且只有当本地和远程都把对应的日志记录刷新到硬盘之后才会对某个客户端操作发出响应。Master会把好几条日志记录汇总在一起然后进行刷新，以便降低刷新和复制操作对系统整体吞吐量的影响。
+
