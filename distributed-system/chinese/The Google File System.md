@@ -74,14 +74,17 @@ GFS的客户端代码被链接到每个应用程序，它实现了该文件系�
 但是当GFS第一次用于一个batch-queue系统时，热点确实是个问题：一个可执行程序被写入到GFS,它的文件只有一个数据块，然后同时在数百台机器上启动这个程序。存储这个可执行程序的少量chunkserver被数百个同时出现的请求搞得过载。我们通过使用一个更高的复制参数来存储这种可执行程序，以及让batch-queue系统错开程序启动的时刻来解决这个问题。一个可能的长期解决方案是允许客户端在这种情况下从其它客户端读取数据。
 
 ### 2.6 元数据（Metadata）
-Master存储三种主要类型的元数据：文件命名空间和数据块命名空间，从文件到数据块的映射，每个数据块的副本的位置。所有的元数据被放在master的内存中。
+Master存储三种主要的元数据：文件命名空间和数据块命名空间，从文件到数据块的映射，每个数据块的副本的位置。所有的元数据被放在master的内存中。通过把变更写入到一个操作日志（operation log）的方式，前两种类型（命名空间和文件到数据块的映射）的元数据也被持久存储，这个操作日志保持在master的本地硬盘，同时在远程机器上保存副本。使用一个日志允许我们
+
 The master stores three major types of metadata: the file
 and chunk namespaces, the mapping from files to chunks,
 and the locations of each chunk’s replicas. All metadata is
 kept in the master’s memory. The first two types (names-
 paces and file-to-chunk mapping) are also kept persistent by
 logging mutations to an operation log stored on the mas-
-ter’s local disk and replicated on remote machines. Using
+ter’s local disk and replicated on remote machines. 
+
+Using
 a log allows us to update the master state simply, reliably,
 and without risking inconsistencies in the event of a master
 crash. The master does not store chunk location informa-
