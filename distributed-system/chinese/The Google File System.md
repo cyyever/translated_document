@@ -113,16 +113,8 @@ GFS拥有一个宽松的一致性模型，它支撑了我们高度分布式的�
 
 一个文件区域（file region）在经受一次数据变更之后的状态取决于变更的类型，变更是成功了还是失败了，以及是否存在并发的变更。表1总结了变更的结果。一个文件区域是*一致*（consistent）的，如果所有的客户端不管从哪个副本读取都总是看到相同的数据。经受一次文件数据变更后，一个文件区域是*有定义*的（defined），如果它是一致的，并且客户端将看到变更所写入的完整数据。当一个变更成功了，而且没受到并发的写入者的干扰，那么受影响的区域是有定义的（也因此依据定义是一致的）：所有的客户端将总能看到变更所写入的数据。并发的成功变更导致了一个一致的但是未定义的文件区域：所有的客户端能看到相同的数据，但看到的数据可能无法反映出任何一个变更到底写入了什么内容。通常来说，它们看到的数据是由多个变更的数据片断混合在一起组成的。一个失败的变更使得文件区域不一致（也因此是未定义的）：不同的客户端在不同的时间点可能看到不同的数据。我们将在下文描述我们的应用程序如何区分有定义的区域和未定义的区域。应用程序无须再进一步区分不同类型的未定义区域。
 
-数据变更可能是写入或者记录添加（）
-Data mutations may be writes or record appends. A write
-causes data to be written at an application-specified file
-offset. A record append causes data (the “record”) to be
-appended atomically at least once even in the presence of
-concurrent mutations, but at an offset of GFS’s choosing
-(Section 3.3). (In contrast, a “regular” append is merely a
-write at an offset that the client believes to be the current
-end of file.) The offset is returned to the client and marks
-the beginning of a defined region that contains the record.
-In addition, GFS may insert padding or record duplicates in
+数据变更可能是写入或者记录添加。写入使得数据被写到应用程序指定的文件偏移量。记录添加使得数据（也就是“记录”）被*原子地*添加*至少一次*，即使出现并发变更的情况，但是添加在GFS所选择的偏移量（3.3节）。（相比之下，“常规”添加也只不过是在某个偏移量的写入，只不过客户端认为这个偏移量是当前的文件尾部）偏移量被返回给客户端，并且标识着包含该记录的文件区域的起始位置。In addition, GFS may insert padding or record duplicates in
 between. They occupy regions considered to be inconsistent
 and are typically dwarfed by the amount of user data.
+
+在一连串的成功变更之后，GFS保证受到变更的文件区域是有定义的，并且包含最后一次变更所写入的数据。GFS通过两个方法来达到这一点：（a）对同一个数据块的所有变更来说，GFS在该数据块的所有副本上以同样的顺序来执行这些变更，以及（b)使用数据块版本号来检测出任何由于所在的chunkserver宕机（4.5节）而错过一些变更以致过时的副本。过时的副本将永远不会参与到某个变更，或者被给予向master询问数据块位置的客户端。这些过时副本将被尽早地垃圾回收。
