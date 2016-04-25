@@ -57,7 +57,7 @@ D [4]: 3—分布式文件系统
 
 文件被分成固定大小的*数据块*（chunk）。master会在创建每个数据块之时分配一个全局唯一的，并且不可修改的64位的*数据块句柄*（chunk handle）给它，来标识这个数据块。Chunkserver把这些数据库当作Linux文件存储在本地硬盘，并且通过指定的数据库句柄和字节范围来读取和写入数据块的数据。为了达到可靠性，每个数据块被复制在多个chunkserver上面。默认情况下，我们存储三个副本，但是用户可以为文件命名空间（file namespace）的不同区域来指定不同的复制级别。
 
-master维护所有的文件系统元数据。这些元数据包含了命名空间，访问控制信息，从文件到数据块的映射关系以及数据块的当前位置（译者注：也就是数据块的所有副本所在的多个chunkserver）。它还控制了整个文件系统范围内的活动，例如数据块凭据（lease）的管理，孤儿数据块的垃圾回收以及数据块在chunkserver之间搬迁。Master定时地通过*心跳*（HeartBeat）消息来与每个chunkserver通信，以便把指令给予chunkserver或者收集它的状态。
+Master维护所有的文件系统元数据。这些元数据包含了命名空间，访问控制信息，从文件到数据块的映射关系以及数据块的当前位置（译者注：也就是数据块的所有副本所在的多个chunkserver）。它还控制了整个文件系统范围内的活动，例如数据块凭据（lease）的管理，孤儿数据块的垃圾回收以及数据块在chunkserver之间搬迁。Master定时地通过*心跳*（HeartBeat）消息来与每个chunkserver通信，以便把指令给予chunkserver或者收集它的状态。
 
 GFS的客户端代码被链接到每个应用程序，它实现了该文件系统的API，并且代表应用程序和master以及chunkserver进行通信，以便读取和写入数据。对于元数据的操作，客户端和master进行交互，但是数据相关的所有通讯是直接在客户端和chunkserver之间进行的。我们并不提供POSIX API，因此不需要给linux的vnode层增加钩子。
 
@@ -97,9 +97,32 @@ Master并没有把哪些chunkserver拥有给定数据块的副本的信息做持
  
 由于操作日志是极其重要的，我们必须可靠地存储它，并且在元数据的修改还没做持久存储之前，不能让这些修改被客户端看到。要不然的话，就算是数据块自身在故障中幸存，我们事实上仍然丢失了整个文件系统或者最近的客户端操作。因此，我们会在多个远程机器上复制操作日志，并且只有当本地和远程都把对应的日志记录刷新到硬盘之后才会对某个客户端操作发出响应。Master会把好几条日志记录汇总在一起然后进行刷新，以便降低刷新和复制操作对系统整体吞吐量的影响。
 
-master通过回放（replay)操作日志来恢复它的文件系统状态。为了最小化master的启动时间，我们必须令操作日志保持在小尺寸。每当操作日志的尺寸增长到超过某个值，master会把它自己的状态做一个检查点（checkpoint），以便它可以通过从硬盘加载最近的检查点，然后只回放这个检查点之后的数量有限的日志记录来恢复状态。检查点被存储为一个紧凑的类B树（B-tree like）的形式，这个形式可以被直接映射到内存并用于命名空间查找而无须做额外的解析。这进一步加快了master的恢复速度并提高了可用性。
+Master通过回放（replay)操作日志来恢复它的文件系统状态。为了最小化master的启动时间，我们必须令操作日志保持在小尺寸。每当操作日志的尺寸增长到超过某个值，master会把它自己的状态做一个检查点（checkpoint），以便它可以通过从硬盘加载最近的检查点，然后只回放这个检查点之后的数量有限的日志记录来恢复状态。检查点被存储为一个紧凑的类B树（B-tree like）的形式，这个形式可以被直接映射到内存并用于命名空间查找而无须做额外的解析。这进一步加快了master的恢复速度并提高了可用性。
 
 由于构建一个检查点需要花费一段时间，master的内部状态被组织成某种形式，以保证在创建新检查点的同时不会推迟对不断接收到的元数据变更的处理。Master切换到一个新的日志文件并在一个单独的线程中创建新检查点。新检查点包含了切换前的所有变更。对一个有几百万文件的集群来说，可以在一分钟左右的时间创建一个新检查点。当创建完毕，它被写入到本地以及远程机器的硬盘。
 
-Master的恢复只需要最近的完整检查点以及随后的日志文件。更早的检查点和日志文件可以随意删除掉，但是我们保留了一些来防范变故。创建检查点时出现的故障不会影响master的正确性，因为恢复代码会检测并跳过不完整的检查点。
+Master只需要最近的完整检查点以及随后的日志文件来进行恢复。更早的检查点和日志文件可以随意删除掉，但是我们保留了一些来防范变故。创建检查点时出现的故障不会影响master的正确性，因为恢复代码会检测并跳过不完整的检查点。
 
+### 2.7 一致性模型（Consistency Model）
+GFS拥有一个宽松的一致性模型，它支撑了我们高度分布式的应用程序，但是实现起来仍然相对简单和高效。现在我们开始讨论GFS给出的保证以及这些保证对应用程序来说意味着什么。我们还突出描述了gfs如何维持这些保证，但是把细节留待论文的其它部分。
+
+![Table 1](https://raw.githubusercontent.com/cyyever/translated_document/master/distributed-system/chinese/images/The%20Google%20File%20System%20Table%201.png)
+
+#### *2.7.1 GFS给出的保证*（Guarantees by GFS）
+文件命名空间的变更（例如创建文件）是原子操作。它们只由master处理：命名空间的锁定保证了原子性和正确性（4.1节）；Master的操作日志给这些操作定义了一个全局范围的全序（2.6.3节）。
+
+一个文件区域（file region）在经受一次数据变更之后的状态取决于变更的类型，变更是成功了还是失败了，以及是否存在并发的变更。表1总结了变更的结果。一个文件区域是*一致*（consistent）的，如果所有的客户端不管从哪个副本读取都总是看到相同的数据。经受一次文件数据变更后，一个文件区域是*有定义*的（defined），如果它是一致的，并且客户端将看到变更所写入的完整数据。当一个变更成功了，而且没受到并发的写入者的干扰，那么受影响的区域是有定义的（也因此依据定义是一致的）：所有的客户端将总能看到变更所写入的数据。并发的成功变更导致了一个一致的但是未定义的文件区域：所有的客户端能看到相同的数据，但看到的数据可能无法反映出任何一个变更到底写入了什么内容。通常来说，它们看到的数据是由多个变更的数据片断混合在一起组成的。一个失败的变更使得文件区域不一致（也因此是未定义的）：不同的客户端在不同的时间点可能看到不同的数据。我们将在下文描述我们的应用程序如何区分有定义的区域和未定义的区域。应用程序无须再进一步区分不同类型的未定义区域。
+
+数据变更可能是写入或者记录添加（）
+Data mutations may be writes or record appends. A write
+causes data to be written at an application-specified file
+offset. A record append causes data (the “record”) to be
+appended atomically at least once even in the presence of
+concurrent mutations, but at an offset of GFS’s choosing
+(Section 3.3). (In contrast, a “regular” append is merely a
+write at an offset that the client believes to be the current
+end of file.) The offset is returned to the client and marks
+the beginning of a defined region that contains the record.
+In addition, GFS may insert padding or record duplicates in
+between. They occupy regions considered to be inconsistent
+and are typically dwarfed by the amount of user data.
